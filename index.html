@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>DODO Flash Loan Arbitrage</title>
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+  <style>
+    body { background-color: #0a0; color: white; font-family: sans-serif; padding: 20px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+    th, td { padding: 8px 12px; border: 1px solid #444; text-align: center; }
+    .profitable { background-color: #00ff00; color: black; font-weight: bold; }
+    .net-profit { color: #00ff00; font-weight: bold; }
+    .clickable-link { color: #00ffff; text-decoration: underline; cursor: pointer; }
+    #log { max-height: 200px; overflow-y: auto; border: 1px solid #444; margin-top: 10px; padding: 10px; background: #111; font-family: monospace; }
+    button { padding: 8px 16px; margin: 5px; background: #333; color: white; border: none; border-radius: 4px; cursor: pointer; }
+    button:hover { background: #555; }
+    .control-group { margin: 10px 0; display: flex; flex-wrap: wrap; gap: 15px; align-items: center; }
+    .profit-display { font-size: 1.2em; font-weight: bold; margin: 10px 0; padding: 8px; background: #333; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>DODO Flash Loan Arbitrage</h1>
+  <p><strong>Wallet:</strong> <span id="wallet">-</span></p>
+  <p><strong>Wallet USDC Balance:</strong> <span id="walletBalance">-</span></p>
+  <p><strong>Contract USDC Balance:</strong> <span id="contractBalance">-</span></p>
+
+  <div class="profit-display">
+    <strong>Accumulated Profit:</strong> <span id="accumulatedProfit">0.00</span> USDC
+  </div>
+
+  <!-- Controls -->
+  <div class="control-group">
+    <button id="connectWallet">Connect Wallet</button>
+    <button id="scanNow">Scan Now</button>
+    <button id="withdrawUSDC">Withdraw USDC</button>
+    <button id="withdrawAll">Withdraw All Funds</button>
+  </div>
+
+  <div class="control-group">
+    <label><input type="checkbox" id="autoTradeToggle"> Auto Trade</label>
+    <label><input type="checkbox" id="backgroundTradeToggle"> Auto Trade in Background</label>
+    <label><input type="checkbox" id="accumulateToggle"> Let profits accumulate</label>
+    <label><input type="checkbox" id="positiveBalanceToggle" checked> Only trade if contract balance ↑</label>
+  </div>
+
+  <div class="control-group">
+    <label>Min Profit %: <input type="number" id="minProfitPct" value="0.2" step="0.1" min="0.1"></label>
+    <label>Trade Amount: <input type="number" id="tradeAmount" value="10" min="1"></label>
+    <label>Slippage %: <input type="number" id="slippagePct" value="0" step="0.1" min="0"></label>
+    <label>Batch: <input type="number" id="batchAmount" value="1" min="0" max="100"></label>
+    <label>Gas Limit: <input type="number" id="gasLimit" value="1000000" min="21000"></label>
+    <label>Scan Interval (sec): <input type="number" id="scanInterval" value="10" min="2"></label>
+  </div>
+
+  <!-- Results Table -->
+  <table>
+    <thead>
+      <tr>
+        <th>Token</th><th>Buy Router</th><th>Sell Router</th><th>Buy Price</th><th>Sell Price</th>
+        <th>Profit $</th><th>Profit %</th><th>Status</th><th>Net Profit</th><th>Time</th><th>Tx Hash</th><th>Action</th>
+      </tr>
+    </thead>
+    <tbody id="results"></tbody>
+  </table>
+
+  <div id="log"></div>
+
+  <script>
+    const contractAddress = "0x98FA2A393Bf5C297FE29E160B244b560a61d9976";
+    const contractABI = [
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "buyRouter",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "sellRouter",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "token",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "amountIn",
+				"type": "uint256"
+			},
+			{
+				"internalType": "bool",
+				"name": "",
+				"type": "bool"
+			},
+			{
+				"internalType": "string",
+				"name": "flashLoanProvider",
+				"type": "string"
+			}
+		],
+		"name": "executeArbitrage",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "asset",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "amount",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "premium",
+				"type": "uint256"
+			},
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			},
+			{
+				"internalType": "bytes",
+				"name": "params",
+				"type": "bytes"
+			}
+		],
+		"name": "executeOperation",
+		"outputs": [
+			{
+				"internalType": "bool",
+				"name": "",
+				"type": "bool"
+			}
+		],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "_aavePool",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "_usdc",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "_aaveProvider",
+				"type": "address"
+			}
+		],
+		"stateMutability": "nonpayable",
+		"type": "constructor"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "newOwner",
+				"type": "address"
+			}
+		],
+		"name": "updateOwner",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "withdrawProfits",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "tokenAddress",
+				"type": "address"
+			}
+		],
+		"name": "withdrawToken",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "AAVE_ADDRESS_PROVIDER",
+		"outputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "AAVE_POOL",
+		"outputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "getContractBalance",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "owner",
+		"outputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "USDC",
+		"outputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	}
+]; // ← Replace with your contract ABI array
+
+    const usdcAddress = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+    const tokens = {
+      WETH: "0x7ceB23fD6bC0adD59E62ac25578270cF1b9f619",
+      DAI:  "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063"
+    };
+    const routers = {
+      QuickSwap: "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff",
+      SushiSwap: "0x1b02da8cb0d097eb8d57a175b88c7d8b47997506"
+    };
+
+    let provider, signer, contract, walletAddress;
+    let isScanning = false, scanTimer;
+    let accumulatedProfit = 0;
+
+    function log(msg) {
+      document.getElementById("log").innerHTML =
+        `[${new Date().toLocaleTimeString()}] ${msg}<br>` +
+        document.getElementById("log").innerHTML;
+    }
+
+    async function connectWallet() {
+      if (!window.ethereum) return alert("MetaMask not found");
+      provider = new ethers.providers.Web3Provider(window.ethereum);
+      await provider.send("eth_requestAccounts", []);
+      signer = provider.getSigner();
+      walletAddress = await signer.getAddress();
+      document.getElementById("wallet").textContent = walletAddress;
+      contract = new ethers.Contract(contractAddress, contractABI, signer);
+      await updateBalances();
+      startAutoScan();
+      log("✅ Wallet connected");
+    }
+
+    async function updateBalances() {
+      const usdc = new ethers.Contract(usdcAddress,
+        ["function balanceOf(address)view returns(uint256)", "function decimals() view returns(uint8)"],
+        provider
+      );
+      const d = await usdc.decimals();
+      const wb = await usdc.balanceOf(walletAddress),
+            cb = await usdc.balanceOf(contractAddress);
+      document.getElementById("walletBalance").textContent = (wb / 10**d).toFixed(4);
+      document.getElementById("contractBalance").textContent = (cb / 10**d).toFixed(4);
+    }
+
+    function startAutoScan() {
+      clearInterval(scanTimer);
+      const intervalMs = parseInt(document.getElementById("scanInterval").value) * 1000;
+      scanTimer = setInterval(async () => {
+        if (!isScanning) await scanAndArbitrage();
+      }, intervalMs);
+      log(`🕒 Auto-scan set to ${intervalMs / 1000}s`);
+    }
+
+    async function scanAndArbitrage() {
+      if (!walletAddress) return log("Connect your wallet first");
+      isScanning = true;
+      document.getElementById("results").innerHTML = "";
+      log("🔍 Starting scan...");
+
+      const minProfit = parseFloat(document.getElementById("minProfitPct").value);
+      const tradeAmt = parseFloat(document.getElementById("tradeAmount").value);
+      const slip = parseFloat(document.getElementById("slippagePct").value);
+      const amtIn = ethers.utils.parseUnits(tradeAmt.toString(), 6);
+
+      for (const [sym, token] of Object.entries(tokens)) {
+        for (const [bName, bRouter] of Object.entries(routers)) {
+          for (const [sName, sRouter] of Object.entries(routers)) {
+            if (bRouter === sRouter) continue;
+            try {
+              const buyOut = await getAmountOut(bRouter, [usdcAddress, token], amtIn);
+              const sellOut = await getAmountOut(sRouter, [token, usdcAddress], buyOut);
+              const received = parseFloat(ethers.utils.formatUnits(sellOut, 6));
+              const profit = received - tradeAmt;
+              const pct = (profit / tradeAmt) * 100;
+              const adjP = profit * (1 - slip / 100);
+              const adjPct = pct * (1 - slip / 100);
+
+              const row = document.createElement("tr");
+              if (adjPct > minProfit) row.classList.add("profitable");
+
+              const tradeBtn = document.createElement("button");
+              tradeBtn.textContent = "Trade";
+              tradeBtn.onclick = () => executeTrade(bRouter, sRouter, token, amtIn, sym, adjPct);
+
+              row.innerHTML = `
+                <td>${sym}</td><td>${bName}</td><td>${sName}</td>
+                <td>${(tradeAmt / parseFloat(ethers.utils.formatUnits(buyOut, 18))).toFixed(6)}</td>
+                <td>${(received / parseFloat(ethers.utils.formatUnits(buyOut, 18))).toFixed(6)}</td>
+                <td>${adjP.toFixed(4)}</td><td>${adjPct.toFixed(2)}%</td>
+                <td>${adjPct > minProfit ? "🚨 Arbitrage" : "❌"}</td>
+                <td class="net-profit">-</td><td>-</td><td>-</td>`;
+              
+              if (adjPct > minProfit) row.querySelector("td:last-child").appendChild(tradeBtn);
+              document.getElementById("results").appendChild(row);
+
+              if (document.getElementById("autoTradeToggle").checked && adjPct > minProfit) {
+                if (document.getElementById("backgroundTradeToggle").checked) {
+                  executeTrade(bRouter, sRouter, token, amtIn, sym, adjPct).catch(e => log(`⚠️ BG trade ${sym}: ${e.message}`));
+                } else {
+                  await executeTrade(bRouter, sRouter, token, amtIn, sym, adjPct);
+                }
+              }
+            } catch (e) {
+              log(`⚠️ ${sym} ${bName}→${sName} failed: ${e.message}`);
+            }
+          }
+        }
+      }
+
+      await updateBalances();
+      isScanning = false;
+      log("✅ Scan complete");
+    }
+
+    async function getAmountOut(routerAddr, path, amt) {
+      const r = new ethers.Contract(routerAddr, ["function getAmountsOut(uint,address[]) view returns(uint[])"], provider);
+      return (await r.getAmountsOut(amt, path))[1];
+    }
+
+    async function executeTrade(bRouter, sRouter, token, amtIn, sym, profitPct) {
+      const batch = parseInt(document.getElementById("batchAmount").value) || 1;
+      const gasL = parseInt(document.getElementById("gasLimit").value) || 1000000;
+      const startBal = await getContractBalance();
+
+      log(`⚡ Executing ${sym} x${batch} (≈ ${profitPct.toFixed(2)}%)`);
+      for (let i = 0; i < batch; i++) {
+        const tx = await contract.executeArbitrage(bRouter, sRouter, token, amtIn, true, "DODO", { gasLimit: gasL });
+        log(`🔗 Tx: <span class="clickable-link" onclick="window.open('https://polygonscan.com/tx/${tx.hash}')">${tx.hash}</span>`);
+        await tx.wait();
+      }
+
+      const endBal = await getContractBalance();
+      const net = endBal - startBal;
+      accumulatedProfit += net;
+      document.getElementById("accumulatedProfit").textContent = accumulatedProfit.toFixed(6);
+
+      // update row: net profit, time, tx
+      const rows = document.querySelectorAll("#results tr");
+      for (let r of rows) {
+        if (r.innerHTML.includes(sym) && r.querySelector(".net-profit").textContent === "-") {
+          r.cells[8].textContent = net.toFixed(6);
+          r.cells[9].textContent = new Date().toLocaleTimeString();
+          break;
+        }
+      }
+
+      await updateBalances();
+      if (!document.getElementById("accumulateToggle").checked) {
+        await withdrawProfits();
+      }
+    }
+
+    async function getContractBalance() {
+      const usdc = new ethers.Contract(usdcAddress, ["function balanceOf(address)view returns(uint256)", "function decimals() view returns(uint8)"], provider);
+      const d = await usdc.decimals();
+      return parseFloat(ethers.utils.formatUnits(await usdc.balanceOf(contractAddress), d));
+    }
+
+    async function withdrawProfits() {
+      const gl = parseInt(document.getElementById("gasLimit").value) || 1000000;
+      const tx = await contract.withdrawProfits({ gasLimit: gl });
+      log(`💸 Withdraw tx: <span class="clickable-link" onclick="window.open('https://polygonscan.com/tx/${tx.hash}')">${tx.hash}</span>`);
+      await tx.wait();
+      await updateBalances();
+    }
+
+    async function withdrawAll() {
+      const gl = parseInt(document.getElementById("gasLimit").value) || 1000000;
+      const tx = await contract.withdrawToken(usdcAddress, { gasLimit: gl });
+      log(`💰 Withdraw all tx: <span class="clickable-link" onclick="window.open('https://polygonscan.com/tx/${tx.hash}')">${tx.hash}</span>`);
+      await tx.wait();
+      await updateBalances();
+    }
+
+    document.getElementById("connectWallet").onclick = connectWallet;
+    document.getElementById("scanNow").onclick = scanAndArbitrage;
+    document.getElementById("withdrawUSDC").onclick = withdrawProfits;
+    document.getElementById("withdrawAll").onclick = withdrawAll;
+  </script>
+</body>
+</html>
